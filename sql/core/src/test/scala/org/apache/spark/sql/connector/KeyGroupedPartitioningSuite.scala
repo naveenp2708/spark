@@ -1130,6 +1130,87 @@ class KeyGroupedPartitioningSuite extends DistributionAndOrderingSuiteBase {
     }
   }
 
+  test("[SPARK-54378] dropDuplicates after SPJ with partial clustering should give correct " +
+      "results") {
+    val items_partitions = Array(identity("id"))
+    createTable(items, itemsColumns, items_partitions)
+    // Insert two copies of id=1 so that the left side has duplicate rows for id=1 after the join,
+    // and three distinct id values in total.
+    sql(s"INSERT INTO testcat.ns.$items VALUES " +
+      "(1, 'aa', 40.0, cast('2020-01-01' as timestamp)), " +
+      "(1, 'aa', 41.0, cast('2020-01-15' as timestamp)), " +
+      "(2, 'bb', 10.0, cast('2020-01-01' as timestamp)), " +
+      "(3, 'cc', 15.5, cast('2020-02-01' as timestamp))")
+
+    val purchases_partitions = Array(identity("item_id"))
+    createTable(purchases, purchasesColumns, purchases_partitions)
+    sql(s"INSERT INTO testcat.ns.$purchases VALUES " +
+      "(1, 42.0, cast('2020-01-01' as timestamp)), " +
+      "(2, 11.0, cast('2020-01-01' as timestamp)), " +
+      "(3, 19.5, cast('2020-02-01' as timestamp))")
+
+    Seq(true, false).foreach { partiallyClustered =>
+      withSQLConf(
+          SQLConf.REQUIRE_ALL_CLUSTER_KEYS_FOR_CO_PARTITION.key -> false.toString,
+          SQLConf.V2_BUCKETING_PUSH_PART_VALUES_ENABLED.key -> true.toString,
+          SQLConf.V2_BUCKETING_PARTIALLY_CLUSTERED_DISTRIBUTION_ENABLED.key ->
+              partiallyClustered.toString) {
+        // dropDuplicates on the join key: must produce exactly 3 distinct id values regardless
+        // of whether partial clustering is active.
+        val df = sql(
+          s"""
+             |SELECT DISTINCT i.id
+             |FROM testcat.ns.$items i
+             |JOIN testcat.ns.$purchases p ON i.id = p.item_id
+             |""".stripMargin)
+        checkAnswer(df, Seq(Row(1), Row(2), Row(3)))
+      }
+    }
+  }
+
+  test("[SPARK-54378] Window dedup after SPJ with partial clustering should give correct " +
+      "results") {
+    val items_partitions = Array(identity("id"))
+    createTable(items, itemsColumns, items_partitions)
+    // Two rows with id=1 so that a naive per-task row_number() without a shuffle would
+    // keep both when partial clustering splits them across tasks.
+    sql(s"INSERT INTO testcat.ns.$items VALUES " +
+      "(1, 'aa', 40.0, cast('2020-01-01' as timestamp)), " +
+      "(1, 'aa', 41.0, cast('2020-01-15' as timestamp)), " +
+      "(2, 'bb', 10.0, cast('2020-01-01' as timestamp)), " +
+      "(3, 'cc', 15.5, cast('2020-02-01' as timestamp))")
+
+    val purchases_partitions = Array(identity("item_id"))
+    createTable(purchases, purchasesColumns, purchases_partitions)
+    sql(s"INSERT INTO testcat.ns.$purchases VALUES " +
+      "(1, 42.0, cast('2020-01-01' as timestamp)), " +
+      "(2, 11.0, cast('2020-01-01' as timestamp)), " +
+      "(3, 19.5, cast('2020-02-01' as timestamp))")
+
+    Seq(true, false).foreach { partiallyClustered =>
+      withSQLConf(
+          SQLConf.REQUIRE_ALL_CLUSTER_KEYS_FOR_CO_PARTITION.key -> false.toString,
+          SQLConf.V2_BUCKETING_PUSH_PART_VALUES_ENABLED.key -> true.toString,
+          SQLConf.V2_BUCKETING_PARTIALLY_CLUSTERED_DISTRIBUTION_ENABLED.key ->
+              partiallyClustered.toString) {
+        // row_number() OVER (PARTITION BY id) should produce rn=1 for exactly one row per id.
+        val df = sql(
+          s"""
+             |SELECT id, price
+             |FROM (
+             |  SELECT i.id, i.price,
+             |         ROW_NUMBER() OVER (PARTITION BY i.id ORDER BY i.price DESC) AS rn
+             |  FROM testcat.ns.$items i
+             |  JOIN testcat.ns.$purchases p ON i.id = p.item_id
+             |) t
+             |WHERE rn = 1
+             |""".stripMargin)
+        // For id=1 only the row with the highest price (41.0) should survive.
+        checkAnswer(df, Seq(Row(1, 41.0f), Row(2, 10.0f), Row(3, 15.5f)))
+      }
+    }
+  }
+
   test("data source partitioning + dynamic partition filtering") {
     withSQLConf(
         SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "-1",

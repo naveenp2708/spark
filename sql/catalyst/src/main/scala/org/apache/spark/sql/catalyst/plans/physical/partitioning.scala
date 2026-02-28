@@ -385,21 +385,32 @@ case class KeyGroupedPartitioning(
     super.satisfies0(required) || {
       required match {
         case c @ ClusteredDistribution(requiredClustering, requireAllClusterKeys, _) =>
-          if (requireAllClusterKeys) {
-            // Checks whether this partitioning is partitioned on exactly same clustering keys of
-            // `ClusteredDistribution`.
-            c.areAllClusterKeysMatched(expressions)
-          } else {
-            // We'll need to find leaf attributes from the partition expressions first.
-            val attributes = expressions.flatMap(_.collectLeaves())
-
-            if (SQLConf.get.v2BucketingAllowJoinKeysSubsetOfPartitionKeys) {
-              // check that join keys (required clustering keys)
-              // overlap with partition keys (KeyGroupedPartitioning attributes)
-              requiredClustering.exists(x => attributes.exists(_.semanticEquals(x))) &&
-                  expressions.forall(_.collectLeaves().size == 1)
+          // When partial clustering is active, the same partition key is intentionally spread
+          // across multiple tasks (partitionValues contains duplicates). In that case, this
+          // partitioning does NOT satisfy ClusteredDistribution, because ClusteredDistribution
+          // requires all rows with the same key to be co-located in a single task. Without this
+          // guard, downstream operators such as dropDuplicates or Window functions would skip
+          // their required shuffle and produce incorrect results.
+          // See SPARK-54378.
+          val isFullyClustered = partitionValues.isEmpty ||
+              uniquePartitionValues.length == partitionValues.length
+          isFullyClustered && {
+            if (requireAllClusterKeys) {
+              // Checks whether this partitioning is partitioned on exactly same clustering keys of
+              // `ClusteredDistribution`.
+              c.areAllClusterKeysMatched(expressions)
             } else {
-              attributes.forall(x => requiredClustering.exists(_.semanticEquals(x)))
+              // We'll need to find leaf attributes from the partition expressions first.
+              val attributes = expressions.flatMap(_.collectLeaves())
+
+              if (SQLConf.get.v2BucketingAllowJoinKeysSubsetOfPartitionKeys) {
+                // check that join keys (required clustering keys)
+                // overlap with partition keys (KeyGroupedPartitioning attributes)
+                requiredClustering.exists(x => attributes.exists(_.semanticEquals(x))) &&
+                    expressions.forall(_.collectLeaves().size == 1)
+              } else {
+                attributes.forall(x => requiredClustering.exists(_.semanticEquals(x)))
+              }
             }
           }
 
