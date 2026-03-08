@@ -1770,14 +1770,6 @@ private[sql] object QueryCompilationErrors extends QueryErrorsBase with Compilat
         "actualSchema" -> actualSchema.toDDL))
   }
 
-  def dataSchemaNotSpecifiedError(format: String, fileCatalog: String): Throwable = {
-    new AnalysisException(
-      errorClass = "UNABLE_TO_INFER_SCHEMA_FOR_DATA_SOURCE",
-      messageParameters = Map(
-        "format" -> format,
-        "fileCatalog" -> fileCatalog))
-  }
-
   def invalidDataSourceError(className: String): Throwable = {
     new AnalysisException(
       errorClass = "_LEGACY_ERROR_TEMP_1135",
@@ -3525,10 +3517,11 @@ private[sql] object QueryCompilationErrors extends QueryErrorsBase with Compilat
   def unsupportedTableChangesInAutoSchemaEvolutionError(
       changes: Array[TableChange], tableName: Seq[String]): Throwable = {
     val sanitizedTableName = tableName.map(_.replaceAll("\"", ""))
+    val changesDesc = changes.map(_.toString).mkString("; ")
     new AnalysisException(
       errorClass = "UNSUPPORTED_TABLE_CHANGES_IN_AUTO_SCHEMA_EVOLUTION",
       messageParameters = Map(
-        "changes" -> changes.mkString(","), "tableName" -> toSQLId(sanitizedTableName)))
+        "changes" -> changesDesc, "tableName" -> toSQLId(sanitizedTableName)))
   }
 
   def pathOptionNotSetCorrectlyWhenReadingError(): Throwable = {
